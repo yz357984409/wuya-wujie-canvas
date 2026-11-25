@@ -1,0 +1,237 @@
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
+
+export const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+export const nowIso = () => new Date().toISOString();
+export const randomId = (prefix = "") => `${prefix}${crypto.randomUUID()}`;
+const atomicWriteQueues = new Map();
+
+export function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
+
+export function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+export function deepClone(value) {
+  return structuredClone(value);
+}
+
+export function parseSize(value) {
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(/^(\d+)\s*[xX]\s*(\d+)$/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height, raw: `${width}x${height}` };
+}
+
+export function parseRatio(value) {
+  if (typeof value !== "string") return null;
+  const match = value.trim().match(/^(\d+)\s*:\s*(\d+)$/);
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+export function slugify(value, fallback = "workflow") {
+  const slug = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return slug || fallback;
+}
+
+export function safeFileName(value) {
+  return path.basename(String(value || "file")).replace(/[^\w.-]+/g, "_");
+}
+
+const MEDIA_EXTENSIONS = new Set([
+  ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif", ".heic", ".heif",
+  ".mp4", ".webm", ".mov", ".mkv", ".avi", ".m4v", ".mpeg", ".mpg",
+  ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".aac", ".opus",
+]);
+
+const MIME_EXTENSIONS = {
+  "image/png": ".png",
+  "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
+  "image/pjpeg": ".jpg",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/bmp": ".bmp",
+  "image/tiff": ".tif",
+  "image/avif": ".avif",
+  "image/heic": ".heic",
+  "image/heif": ".heif",
+  "video/mp4": ".mp4",
+  "video/webm": ".webm",
+  "video/quicktime": ".mov",
+  "video/x-matroska": ".mkv",
+  "video/x-msvideo": ".avi",
+  "video/mpeg": ".mpg",
+  "audio/mpeg": ".mp3",
+  "audio/wav": ".wav",
+  "audio/x-wav": ".wav",
+  "audio/flac": ".flac",
+  "audio/ogg": ".ogg",
+  "audio/mp4": ".m4a",
+  "audio/aac": ".aac",
+  "audio/opus": ".opus",
+};
+
+export function normalizeMediaExtension(name, mimeType) {
+  const raw = path.extname(String(name || "")).toLowerCase();
+  if (MEDIA_EXTENSIONS.has(raw)) return raw;
+  const mime = String(mimeType || "").split(";")[0].trim().toLowerCase();
+  return MIME_EXTENSIONS[mime] || ".png";
+}
+
+export function uniqueFileName(value, suffix = crypto.randomUUID().slice(0, 8), mimeType = "") {
+  const safe = safeFileName(value || "image.png");
+  const rawExt = path.extname(safe);
+  const ext = normalizeMediaExtension(safe, mimeType);
+  const stem = path.basename(safe, rawExt).slice(0, 60) || "image";
+  return safeFileName(`${stem}-${suffix}${ext}`);
+}
+
+export async function readTextFile(file, maxBytes) {
+  const stat = await fs.stat(file);
+  if (!stat.isFile()) throw new Error(`不是文件：${file}`);
+  if (maxBytes && stat.size > maxBytes) throw new Error(`文件过大：${stat.size} bytes`);
+  return fs.readFile(file, "utf8");
+}
+
+export async function readJsonFile(file, maxBytes) {
+  return JSON.parse(await readTextFile(file, maxBytes));
+}
+
+const WINDOWS_RENAME_RETRY_MS = [5, 10, 20, 40, 80, 160, 250, 300, 400];
+
+async function renameAtomicTemp(tmp, file) {
+  const retryCodes = new Set(["EPERM", "EACCES", "EBUSY"]);
+  const delays = process.platform === "win32" ? WINDOWS_RENAME_RETRY_MS : [0];
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(tmp, file);
+      return;
+    } catch (error) {
+      // Windows allows reads to block rename; retry without giving up atomic replacement.
+      if (attempt >= delays.length || !retryCodes.has(error?.code)) throw error;
+      await sleep(delays[attempt]);
+    }
+  }
+}
+
+export function writeJsonAtomic(file, value) {
+  const previous = atomicWriteQueues.get(file) || Promise.resolve();
+  const operation = previous.catch(() => {}).then(async () => {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = `${file}.${process.pid}.${Date.now()}.${randomId()}.tmp`;
+    try {
+      await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+      await renameAtomicTemp(tmp, file);
+    } catch (error) {
+      await fs.rm(tmp, { force: true }).catch(() => {});
+      throw error;
+    }
+  });
+  atomicWriteQueues.set(file, operation);
+  return operation.finally(() => {
+    if (atomicWriteQueues.get(file) === operation) atomicWriteQueues.delete(file);
+  });
+}
+
+export function mimeFromFilename(filename) {
+  const ext = path.extname(String(filename || "")).toLowerCase();
+  if (ext === ".mp4") return "video/mp4";
+  if (ext === ".webm") return "video/webm";
+  if (ext === ".mov") return "video/quicktime";
+  if (ext === ".gif") return "image/gif";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".jpg" || ext === ".jpeg") return "image/jpeg";
+  if (ext === ".png") return "image/png";
+  if (ext === ".wav") return "audio/wav";
+  if (ext === ".mp3") return "audio/mpeg";
+  return "application/octet-stream";
+}
+
+export function extFromMime(mimeType, filename, fallback = "bin") {
+  const fromName = path.extname(String(filename || "")).replace(/^\./, "").toLowerCase();
+  if (fromName) return fromName;
+  const mime = String(mimeType || "").toLowerCase();
+  if (mime === "video/mp4") return "mp4";
+  if (mime === "video/webm") return "webm";
+  if (mime === "image/png") return "png";
+  if (mime === "image/jpeg") return "jpg";
+  if (mime === "image/webp") return "webp";
+  if (mime === "image/gif") return "gif";
+  if (mime === "audio/wav") return "wav";
+  if (mime === "audio/mpeg") return "mp3";
+  return fallback;
+}
+
+export function jsonError(message, { code, type, details } = {}) {
+  return {
+    error: {
+      message: String(message || "Request failed"),
+      type: type || "invalid_request_error",
+      ...(code ? { code } : {}),
+      ...(details ? { details } : {}),
+    },
+  };
+}
+
+export function truncate(value, max = 2000) {
+  const text = String(value ?? "");
+  return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+export function framesFromSeconds(seconds, fps = 24) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.max(1, Math.round(value * fps));
+}
+
+// H3 的长度必须是 17n+5；向下对齐，保证不超过源视频的实际帧数。
+export function alignH3Frames(frames, { minN = 1 } = {}) {
+  const value = Number(frames);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const n = Math.floor((value - 5) / 17);
+  return 17 * Math.max(n, minN) + 5;
+}
+
+// 官方 H3 参考视频单段上限 15 秒：24fps 下 17×21+5=362 帧。
+// 超过后模型不再处于训练长度内，会把整段参考塞进内存并顶爆 RAM。
+export const H3_MAX_REFERENCE_FRAMES = 362;
+
+export function capH3ReferenceFrames(frames) {
+  const value = Number(frames);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  return Math.min(value, H3_MAX_REFERENCE_FRAMES);
+}
+
+// Viggle Remake 单窗口是 17n+5，范围 90–345 帧（24fps 下 3.75–14.375s）。
+export const VIGGLE_MIN_FRAMES = 90;
+export const VIGGLE_MAX_FRAMES = 345;
+
+export function alignViggleFrames(frames) {
+  const value = Number(frames);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const n = Math.max(5, Math.floor((value - 5) / 17));
+  return Math.min(17 * n + 5, VIGGLE_MAX_FRAMES);
+}
+
+// Remake 只能接 17n+5；源片取下一档并补帧，生成后再裁回源时长，避免对齐时丢帧。
+export function alignViggleFramesUp(frames) {
+  const value = Number(frames);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const n = Math.max(5, Math.ceil((value - 5) / 17));
+  return Math.min(17 * n + 5, VIGGLE_MAX_FRAMES);
+}

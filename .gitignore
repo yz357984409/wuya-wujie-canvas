@@ -1,0 +1,60 @@
+# dependencies
+node_modules/
+**/node_modules/
+
+# assistant runtime (full package only; workspace/deps are large and local)
+assistant/workspace/
+assistant/data/
+assistant/backups/
+assistant/runtime.zip
+assistant/agent-provider.json
+assistant/runtime.json
+assistant-runtime.zip
+assistant/*.log
+
+# local runtime state
+launcher/config.json
+launcher/launcher.log
+comfyui-gateway/data/
+comfyui-gateway/samples/
+comfyui-gateway/test/.tmp/
+*.log
+*.tsbuildinfo
+
+# environment / secrets
+.env
+.env.*
+!.env.example
+
+# generated output (the committed web/dist is a release artifact)
+infinite-canvas/.next/
+infinite-canvas/out/
+infinite-canvas/plugins/canvas/*/dist/
+
+# editor / OS
+.DS_Store
+.idea/
+.vscode/
+
+# local test artifacts
+tmp-*
+
+# internal working docs (local only, never published)
+docs/HANDOFF.md
+docs/PROJECT_LOG.md
+docs/FEEDBACK-BACKLOG.md
+docs/RELEASE-HISTORY.md
+
+# local release artifacts
+/patches/
+
+# bundled model files: shipped inside the distribution package, too large for git
+comfyui-gateway/resources/bundled/
+comfyui-gateway/resources/loras/*.safetensors
+
+# 极速草稿为本地实验，不进发布
+comfyui-gateway/workflows/h3-fast-draft.json
+
+# python bytecode
+__pycache__/
+*.pyc

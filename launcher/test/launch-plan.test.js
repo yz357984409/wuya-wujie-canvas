@@ -1,0 +1,455 @@
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import http from "node:http";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import { browseHostFor, comfyInstallInfo, comfyPortCandidates, compareRuntimeVersions, createCanvasServer, ensureAssistantRuntime, isLoopbackHost, listenCanvasServer, normalizeHost, probeAnyComfy, requestGatewayShutdown, resolveLaunchPlan, runtimeGatewayForRequest } from "../start.mjs";
+
+async function fake(files) {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "launch-plan-"));
+  for (const [rel, content] of Object.entries(files)) {
+    const full = path.join(root, rel);
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.writeFile(full, content || "");
+  }
+  return root;
+}
+
+test("desktop install launches the Electron exe", async () => {
+  const dir = await fake({ "ComfyUI.exe": "", "resources/ComfyUI/main.py": "" });
+  try {
+    const info = comfyInstallInfo(dir);
+    assert.ok(info, "desktop install should be recognized");
+    const plan = resolveLaunchPlan(info);
+    assert.equal(plan.kind, "desktop");
+    assert.match(plan.file, /ComfyUI\.exe$/);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("portable or integrated package launches python main.py directly", async () => {
+  const dir = await fake({ "python_embeded/python.exe": "", "ComfyUI/main.py": "" });
+  try {
+    const info = comfyInstallInfo(dir);
+    const plan = resolveLaunchPlan(info);
+    assert.equal(plan.kind, "python");
+    assert.match(plan.file, /python\.exe$/);
+    assert.match(plan.mainPy, /main\.py$/);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("falls back to a vendor bat, including oddly named ones that call main.py", async () => {
+  const official = await fake({ "run_nvidia_gpu.bat": "python ComfyUI\main.py --listen 127.0.0.1" });
+  const odd = await fake({ "ComfyUI/main.py": "", "整合包启动.bat": "python ComfyUI\main.py" });
+  const unnamed = await fake({ "ComfyUI/main.py": "", "go.bat": "python ComfyUI\main.py" });
+  try {
+    assert.equal(resolveLaunchPlan(comfyInstallInfo(official)).kind, "script");
+    assert.match(resolveLaunchPlan(comfyInstallInfo(odd)).file, /整合包启动\.bat$/);
+    assert.match(resolveLaunchPlan(comfyInstallInfo(unnamed)).file, /go\.bat$/);
+  } finally {
+    for (const dir of [official, odd, unnamed]) await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("port candidates cover desktop 8000 and honor COMFY_PORT_SCAN", () => {
+  const ports = comfyPortCandidates({ comfyUrl: "http://127.0.0.1:8188" });
+  assert.ok(ports.includes(8188));
+  assert.ok(ports.includes(8000), "desktop default port");
+  assert.ok(ports.includes(7860));
+  const previous = process.env.COMFY_PORT_SCAN;
+  process.env.COMFY_PORT_SCAN = "9000-9002,9100";
+  try {
+    const scanned = comfyPortCandidates({ comfyUrl: "http://127.0.0.1:8188" });
+    for (const port of [9000, 9001, 9002, 9100]) assert.ok(scanned.includes(port), `missing ${port}`);
+  } finally {
+    if (previous === undefined) delete process.env.COMFY_PORT_SCAN;
+    else process.env.COMFY_PORT_SCAN = previous;
+  }
+});
+
+test("dynamic probing finds ComfyUI on a non-standard port", async () => {
+  const http = await import("node:http");
+  const server = http.createServer((req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(JSON.stringify({ system: { os: "nt", ram_total: 2048, ram_free: 1024 }, devices: [{ name: "Stub GPU", type: "cuda", vram_total: 1024, vram_free: 512 }] }));
+  });
+  await new Promise((resolve) => server.listen(18123, "127.0.0.1", resolve));
+  try {
+    const hit = await probeAnyComfy([18122, 18123], 500);
+    assert.ok(hit, "should find the stub");
+    assert.match(hit.url, /:18123$/);
+  } finally {
+    server.close();
+  }
+});
+
+test("finds the python bundled under an integration package's env/python directory", async () => {
+  const dir = await fake({ "ComfyUI/main.py": "", "env/python/python.exe": "" });
+  try {
+    const info = comfyInstallInfo(dir);
+    assert.ok(info, "integrated package should be recognized");
+    assert.match(info.pythonExe.replaceAll("\\", "/"), /env\/python\/python\.exe$/);
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("host binding helpers keep loopback defaults and accept LAN hosts", () => {
+  assert.equal(isLoopbackHost("127.0.0.1"), true);
+  assert.equal(isLoopbackHost("localhost"), true);
+  assert.equal(isLoopbackHost("::1"), true);
+  assert.equal(isLoopbackHost("0.0.0.0"), false);
+  assert.equal(isLoopbackHost("192.168.1.10"), false);
+  assert.equal(normalizeHost("http://192.168.1.10/"), "192.168.1.10");
+  assert.equal(browseHostFor("0.0.0.0"), "127.0.0.1");
+  assert.equal(browseHostFor("192.168.1.10"), "192.168.1.10");
+});
+
+test("canvas server falls back to a free port when 3000 is occupied", async () => {
+  const http = await import("node:http");
+  const blocker = http.createServer((_req, res) => res.end("occupied"));
+  await new Promise((resolve) => blocker.listen(0, "127.0.0.1", resolve));
+  const occupied = blocker.address().port;
+  try {
+    const result = await listenCanvasServer({ canvasDist: os.tmpdir(), gatewayUrl: "http://127.0.0.1:8190", gatewayPort: 8190 }, occupied);
+    try {
+      assert.notEqual(result.port, occupied);
+      assert.equal(result.port, occupied + 1);
+    } finally {
+      result.server.close();
+    }
+  } finally {
+    blocker.close();
+  }
+});
+
+test("gateway shutdown request posts to the local stop endpoint with the token", async () => {
+  let captured;
+  const server = http.createServer((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => {
+      raw += chunk;
+    });
+    req.on("end", () => {
+      captured = { method: req.method, path: req.url, token: req.headers["x-gateway-token"], body: raw };
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const result = await requestGatewayShutdown(`http://127.0.0.1:${server.address().port}`, { token: "test-token" });
+    assert.equal(result.ok, true);
+    assert.equal(result.status, 200);
+    assert.equal(captured.method, "POST");
+    assert.equal(captured.path, "/api/system/shutdown");
+    assert.equal(captured.token, "test-token");
+    assert.equal(captured.body, "{}");
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("assistant runtime zip extracts once and is skipped when ready", async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-runtime-"));
+  const payload = path.join(root, "payload");
+  const files = [
+    "server.mjs",
+    "package-lock.json",
+    "node_modules/@mariozechner/pi-agent-core/package.json",
+    "node_modules/@mariozechner/pi-ai/package.json",
+    "workspace/infinite-canvas/web/package.json",
+    "workspace/infinite-canvas/web/node_modules/.keep",
+  ];
+  for (const rel of files) {
+    const full = path.join(payload, rel);
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.writeFile(full, "{}", "utf8");
+  }
+  const assistantDir = path.join(root, "assistant");
+  await fsp.mkdir(assistantDir, { recursive: true });
+  await fsp.writeFile(path.join(assistantDir, "server.mjs"), "newer-source", "utf8");
+  await fsp.writeFile(path.join(assistantDir, "package-lock.json"), "newer-lock", "utf8");
+  const archive = path.join(assistantDir, "runtime.zip");
+  const tar = process.env.SystemRoot ? path.join(process.env.SystemRoot, "System32", "tar.exe") : "tar";
+  execFileSync(tar, ["-a", "-c", "-f", archive, "-C", payload, "."], { timeout: 120000, windowsHide: true });
+  try {
+    const first = await ensureAssistantRuntime(root, { logger: () => {} });
+    assert.equal(first.ok, true);
+    assert.equal(first.extracted, true);
+    assert.equal(first.runtimePackagePresent, true);
+    assert.ok(fs.existsSync(path.join(assistantDir, "server.mjs")));
+    assert.equal(fs.readFileSync(path.join(assistantDir, "server.mjs"), "utf8"), "newer-source");
+    assert.equal(fs.readFileSync(path.join(assistantDir, "package-lock.json"), "utf8"), "newer-lock");
+    assert.ok(fs.existsSync(path.join(assistantDir, "workspace", "infinite-canvas", "web", "node_modules")));
+    const second = await ensureAssistantRuntime(root, { logger: () => {} });
+    assert.equal(second.ok, true);
+    assert.equal(second.extracted, false);
+    assert.equal(second.reason, "already-ready");
+    await fsp.rm(path.join(assistantDir, "runtime.json"), { force: true });
+    const markerMissing = await ensureAssistantRuntime(root, { logger: () => {} });
+    assert.equal(markerMissing.ok, true);
+    assert.equal(markerMissing.extracted, false);
+    assert.equal(markerMissing.reason, "already-ready");
+    assert.equal(fs.readFileSync(path.join(assistantDir, "server.mjs"), "utf8"), "newer-source");
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+async function makeRuntimeZip(root, version = "v0.23.1") {
+  const payload = path.join(root, "runtime-payload");
+  for (const rel of [
+    "server.mjs",
+    "node_modules/@mariozechner/pi-agent-core/package.json",
+    "node_modules/@mariozechner/pi-ai/package.json",
+    "workspace/infinite-canvas/web/package.json",
+    "workspace/infinite-canvas/web/node_modules/.keep",
+    "workspace/VERSION",
+  ]) {
+    const full = path.join(payload, rel);
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.writeFile(full, rel === "workspace/VERSION" ? `${version}
+` : "{}", "utf8");
+  }
+  const archive = path.join(root, "mirror-runtime.zip");
+  const tar = process.env.SystemRoot ? path.join(process.env.SystemRoot, "System32", "tar.exe") : "tar";
+  execFileSync(tar, ["-a", "-c", "-f", archive, "-C", payload, "."], { timeout: 120000, windowsHide: true });
+  return archive;
+}
+
+test("runtime versions compare numerically and never downgrade", () => {
+  assert.equal(compareRuntimeVersions("v0.23.1", "v0.24.10"), -1);
+  assert.equal(compareRuntimeVersions("v0.24.10", "v0.24.10"), 0);
+  assert.equal(compareRuntimeVersions("v0.25.0", "v0.24.10"), 1);
+  assert.equal(compareRuntimeVersions("0.9.9", "v0.10.0"), -1);
+});
+
+test("assistant runtime upgrades an older workspace and keeps the old data", async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-runtime-update-"));
+  const oldZip = await makeRuntimeZip(root, "v0.23.1");
+  await fsp.mkdir(path.join(root, "assistant", "data"), { recursive: true });
+  await fsp.writeFile(path.join(root, "assistant", "data", "keep.txt"), "keep", "utf8");
+  await fsp.copyFile(oldZip, path.join(root, "assistant", "runtime.zip"));
+  try {
+    const first = await ensureAssistantRuntime(root, { logger: () => {} });
+    assert.equal(first.ok, true);
+    assert.equal(first.runtimeVersion, "v0.23.1");
+    const newZip = await makeRuntimeZip(root, "v0.24.10");
+    await fsp.copyFile(newZip, path.join(root, "assistant", "runtime.zip"));
+    await fsp.writeFile(path.join(root, "update.json"), JSON.stringify({ assistantRuntime: { runtimeVersion: "v0.24.10" } }), "utf8");
+    const updated = await ensureAssistantRuntime(root, { logger: () => {} });
+    assert.equal(updated.ok, true);
+    assert.equal(updated.updated, true);
+    assert.equal(updated.runtimeVersion, "v0.24.10");
+    assert.equal(fs.readFileSync(path.join(root, "assistant", "workspace", "VERSION"), "utf8").trim(), "v0.24.10");
+    assert.equal(fs.readFileSync(path.join(root, "assistant", "data", "keep.txt"), "utf8"), "keep");
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("assistant runtime without a package fails honestly instead of reporting ready", async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-runtime-missing-"));
+  const messages = [];
+  try {
+    const result = await ensureAssistantRuntime(root, { logger: (message, level) => messages.push([message, level]) });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "missing-runtime-package");
+    assert.equal(result.runtimePackagePresent, false);
+    assert.ok(messages.some(([message, level]) => level === "WARN" && message.includes("未下载 Agent 运行时包")));
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("assistant runtime already installed without a package stays usable with a warning", async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-runtime-ready-"));
+  const assistantDir = path.join(root, "assistant");
+  for (const rel of [
+    "server.mjs",
+    "node_modules/@mariozechner/pi-agent-core/package.json",
+    "node_modules/@mariozechner/pi-ai/package.json",
+    "workspace/infinite-canvas/web/package.json",
+    "workspace/infinite-canvas/web/node_modules/.keep",
+    "workspace/VERSION",
+  ]) {
+    const full = path.join(assistantDir, rel);
+    await fsp.mkdir(path.dirname(full), { recursive: true });
+    await fsp.writeFile(full, "{}", "utf8");
+  }
+  const messages = [];
+  try {
+    const result = await ensureAssistantRuntime(root, { logger: (message, level) => messages.push([message, level]) });
+    assert.equal(result.ok, true);
+    assert.equal(result.reason, "ready-without-package");
+    assert.equal(result.runtimePackagePresent, false);
+    assert.ok(messages.some(([message, level]) => level === "WARN" && message.includes("未找到 assistant-runtime.zip")));
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("assistant runtime reports an incomplete extraction instead of success", async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-runtime-incomplete-"));
+  const payload = path.join(root, "payload");
+  await fsp.mkdir(payload, { recursive: true });
+  await fsp.writeFile(path.join(payload, "server.mjs"), "{}", "utf8");
+  const assistantDir = path.join(root, "assistant");
+  await fsp.mkdir(assistantDir, { recursive: true });
+  const archive = path.join(assistantDir, "runtime.zip");
+  const tar = process.env.SystemRoot ? path.join(process.env.SystemRoot, "System32", "tar.exe") : "tar";
+  execFileSync(tar, ["-a", "-c", "-f", archive, "-C", payload, "."], { timeout: 120000, windowsHide: true });
+  try {
+    const result = await ensureAssistantRuntime(root, { logger: () => {} });
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "incomplete-extract");
+    assert.equal(result.runtimePackagePresent, true);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("assistant runtime mirror download verifies SHA256 and can retry after failure", async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-runtime-download-"));
+  const zip = await makeRuntimeZip(root);
+  const bytes = await fsp.readFile(zip);
+  const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  let mode = "fail";
+  const server = http.createServer((req, res) => {
+    if (mode === "fail") {
+      res.writeHead(500);
+      res.end("no");
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/zip" });
+    res.end(bytes);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/assistant-runtime.zip`;
+  await fsp.writeFile(path.join(root, "update.json"), JSON.stringify({ assistantRuntime: { url, sha256, size: bytes.length } }), "utf8");
+  try {
+    const failed = await ensureAssistantRuntime(root, { logger: () => {}, download: true });
+    assert.equal(failed.ok, false);
+    assert.equal(failed.reason, "download-failed");
+    assert.equal(fs.existsSync(path.join(root, "assistant", "server.mjs")), false);
+
+    mode = "ok";
+    const wrongSha = await ensureAssistantRuntime(root, { logger: () => {}, download: true, mirrorSha256: "0".repeat(64) });
+    assert.equal(wrongSha.ok, false);
+    assert.equal(wrongSha.reason, "download-failed");
+    assert.match(wrongSha.error, /SHA256/);
+
+    const retried = await ensureAssistantRuntime(root, { logger: () => {}, download: true });
+    assert.equal(retried.ok, true);
+    assert.equal(retried.extracted, true);
+    assert.ok(fs.existsSync(path.join(root, "assistant", "node_modules", "@mariozechner", "pi-agent-core")));
+    assert.ok(fs.existsSync(path.join(root, ".update", "assistant-runtime", "assistant-runtime.zip")));
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("assistant runtime uses a local downloaded zip and rejects a bad hash", async () => {
+  const root = await fsp.mkdtemp(path.join(os.tmpdir(), "assistant-runtime-local-"));
+  const zip = await makeRuntimeZip(root);
+  const bytes = await fsp.readFile(zip);
+  const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+  const local = path.join(root, ".update", "assistant-runtime", "assistant-runtime.zip");
+  await fsp.mkdir(path.dirname(local), { recursive: true });
+  await fsp.writeFile(local, bytes);
+  try {
+    const rejected = await ensureAssistantRuntime(root, { logger: () => {}, mirrorSha256: "f".repeat(64) });
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.reason, "invalid-local-package");
+    assert.equal(fs.existsSync(local), false);
+
+    await fsp.writeFile(local, bytes);
+    const accepted = await ensureAssistantRuntime(root, { logger: () => {}, mirrorSha256: sha256 });
+    assert.equal(accepted.ok, true);
+    assert.equal(accepted.extracted, true);
+    assert.equal(accepted.runtimePackagePresent, true);
+  } finally {
+    await fsp.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime gateway config keeps loopback for local pages", () => {
+  const cfg = {
+    gatewayUrl: "http://127.0.0.1:8190",
+    gatewayPublicUrl: "http://192.168.1.50:8190",
+    gatewayHost: "0.0.0.0",
+    gatewayPort: 8190,
+    allowLan: true,
+  };
+  assert.deepEqual(runtimeGatewayForRequest(cfg, "127.0.0.1:3000"), { host: "127.0.0.1", url: "http://127.0.0.1:8190/v1" });
+  assert.deepEqual(runtimeGatewayForRequest(cfg, "localhost:3000"), { host: "127.0.0.1", url: "http://127.0.0.1:8190/v1" });
+});
+
+test("runtime gateway config uses the request host for LAN pages", () => {
+  const cfg = {
+    gatewayUrl: "http://127.0.0.1:8190",
+    gatewayPublicUrl: "http://127.0.0.1:8190",
+    gatewayHost: "0.0.0.0",
+    gatewayPort: 8190,
+    allowLan: true,
+  };
+  assert.deepEqual(runtimeGatewayForRequest(cfg, "192.168.1.20:3000"), { host: "192.168.1.20", url: "http://192.168.1.20:8190/v1" });
+  assert.deepEqual(runtimeGatewayForRequest(cfg, "[fd00::20]:3000"), { host: "[fd00::20]", url: "http://[fd00::20]:8190/v1" });
+});
+
+test("runtime gateway config prefers an explicit public URL and ignores LAN when disabled", () => {
+  const publicCfg = {
+    gatewayUrl: "http://127.0.0.1:8190",
+    gatewayPublicUrl: "http://gateway.example.test:8190",
+    gatewayHost: "0.0.0.0",
+    gatewayPort: 8190,
+    allowLan: true,
+  };
+  assert.deepEqual(runtimeGatewayForRequest(publicCfg, "192.168.1.20:3000"), { host: "gateway.example.test", url: "http://gateway.example.test:8190/v1" });
+  const localOnly = { ...publicCfg, allowLan: false, gatewayHost: "127.0.0.1", gatewayPublicUrl: "http://127.0.0.1:8190" };
+  assert.deepEqual(runtimeGatewayForRequest(localOnly, "192.168.1.20:3000"), { host: "127.0.0.1", url: "http://127.0.0.1:8190/v1" });
+});
+
+test("canvas server serves per-request config.js without caching", async () => {
+  const dist = await fsp.mkdtemp(path.join(os.tmpdir(), "canvas-config-"));
+  await fsp.writeFile(path.join(dist, "index.html"), "ok");
+  const cfg = {
+    canvasDist: dist,
+    gatewayUrl: "http://127.0.0.1:8190",
+    gatewayPublicUrl: "http://127.0.0.1:8190",
+    gatewayHost: "0.0.0.0",
+    gatewayPort: 8190,
+    allowLan: true,
+  };
+  const server = createCanvasServer(cfg);
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = server.address().port;
+  const fetchConfig = (host) =>
+    new Promise((resolve, reject) => {
+      http.get({ host: "127.0.0.1", port, path: "/config.js", headers: { host } }, (res) => {
+        let body = "";
+        res.on("data", (chunk) => { body += chunk; });
+        res.on("end", () => resolve({ res, body }));
+      }).on("error", reject);
+    });
+  try {
+    const local = await fetchConfig("127.0.0.1:3000");
+    assert.match(local.body, /http:\/\/127\.0\.0\.1:8190\/v1/);
+    assert.equal(local.res.headers["cache-control"], "no-store");
+    const remote = await fetchConfig("192.168.1.20:3000");
+    assert.match(remote.body, /http:\/\/192\.168\.1\.20:8190\/v1/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await fsp.rm(dist, { recursive: true, force: true });
+  }
+});

@@ -1,0 +1,27 @@
+{
+    "version":  "v0.25.3",
+    "publishedAt":  "2026-11-18",
+    "notes":  "v0.25.3ï¼åæ­æ°å¢å¿«éï¼INT8ï¼ä¸è´¨éï¼BF16ï¼ä¸¤æ¡£ï¼é»è®¤å¿«éå¹¶å¯æå¡è®°å¿ï¼æ°å¢ oldx Qwen 2.1 äººç©æ¿æ¢ LoRA èµæºå¡ï¼é­æ­èªæç®¡ï¼ã",
+    "repository":  "https://modelscope.cn/datasets/shensanshu/ComfyUI-Local-Infinite-Canvas",
+    "downloadUrl":  "https://modelscope.cn/datasets/shensanshu/ComfyUI-Local-Infinite-Canvas/resolve/master/patches/update-bridge.zip",
+    "mirrors":  {
+                    "modelscope":  "https://modelscope.cn/datasets/shensanshu/ComfyUI-Local-Infinite-Canvas"
+                },
+    "patch":  {
+                  "url":  "https://modelscope.cn/datasets/shensanshu/ComfyUI-Local-Infinite-Canvas/resolve/master/patches/v0.25.3.zip",
+                  "sha256":  "5a96de27497f9a5213f0bd80461b9337e1e41fec50045e157ba4a479feab4b07",
+                  "size":  210547524
+              },
+    "bridge":  {
+                   "url":  "https://modelscope.cn/datasets/shensanshu/ComfyUI-Local-Infinite-Canvas/resolve/master/patches/update-bridge.zip",
+                   "sha256":  "7d4cf0abfad8ad48d59d536200cd64b07c5ce408036ad1d7dfbe69c7afdc620a",
+                   "size":  6063
+               },
+    "assistantRuntime":  {
+                             "sha256":  "759f93fdedf60696d351abbae7ca4515ceb37470475b345a6e6b664ad09a0ce3",
+                             "size":  131205897,
+                             "fullPackageUrl":  "https://pan.quark.cn/s/a4a8eead0730",
+                             "url":  "https://modelscope.cn/datasets/shensanshu/ComfyUI-Local-Infinite-Canvas/resolve/master/assistant/assistant-runtime.zip",
+                             "runtimeVersion":  "v0.24.10"
+                         }
+}

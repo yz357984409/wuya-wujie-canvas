@@ -1,0 +1,138 @@
+import assert from "node:assert/strict";
+import http from "node:http";
+import { test } from "node:test";
+
+import { createComfyClient } from "../src/comfy-client.js";
+
+function listen(handler) {
+  return new Promise((resolve) => {
+    const server = http.createServer(handler);
+    server.listen(0, "127.0.0.1", () => resolve({ server, port: server.address().port }));
+  });
+}
+
+function close(server) {
+  server.closeAllConnections?.();
+  return new Promise((resolve) => server.close(resolve));
+}
+
+test("GET requests retry transient 5xx responses", async () => {
+  let calls = 0;
+  const { server, port } = await listen((req, res) => {
+    calls += 1;
+    if (calls === 1) {
+      res.writeHead(503, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: "starting" }));
+      return;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ abc: { outputs: { 1: { images: [] } } } }));
+  });
+  const comfy = createComfyClient({ baseUrl: `http://127.0.0.1:${port}`, retryAttempts: 3, retryDelayMs: 10 });
+  try {
+    const history = await comfy.history("abc");
+    assert.equal(calls, 2);
+    assert.ok(history);
+  } finally {
+    await close(server);
+  }
+});
+
+test("POST submissions are never retried", async () => {
+  let calls = 0;
+  const { server, port } = await listen((_req, res) => {
+    calls += 1;
+    res.writeHead(503, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "unavailable" }));
+  });
+  const comfy = createComfyClient({ baseUrl: `http://127.0.0.1:${port}`, retryAttempts: 3, retryDelayMs: 10 });
+  try {
+    await assert.rejects(
+      () => comfy.submit({ 1: { class_type: "Test", inputs: {} } }),
+      (error) => error.code === "comfy_http_error" && error.httpStatus === 503,
+    );
+    assert.equal(calls, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+test("validation errors include node-level ComfyUI messages", async () => {
+  const { server, port } = await listen((_req, res) => {
+    res.writeHead(400, { "content-type": "application/json" });
+    res.end(JSON.stringify({
+      error: { message: "Prompt outputs failed validation" },
+      node_errors: {
+        "16": { errors: [{ message: "Value not in list: lora_name: 'Krea2-功能-角色四视图.safetensors'" }] },
+      },
+    }));
+  });
+  const comfy = createComfyClient({ baseUrl: `http://127.0.0.1:${port}`, retryAttempts: 1 });
+  try {
+    await assert.rejects(
+      () => comfy.submit({ 16: { class_type: "LoraLoaderModelOnly", inputs: {} } }),
+      (error) => error.code === "comfy_http_error" && error.message.includes("节点 16") && error.message.includes("lora_name"),
+    );
+  } finally {
+    await close(server);
+  }
+});
+
+test("4xx responses are not retried", async () => {  let calls = 0;
+  const { server, port } = await listen((_req, res) => {
+    calls += 1;
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "not found" }));
+  });
+  const comfy = createComfyClient({ baseUrl: `http://127.0.0.1:${port}`, retryAttempts: 3, retryDelayMs: 10 });
+  try {
+    await assert.rejects(
+      () => comfy.history("missing"),
+      (error) => error.code === "comfy_http_error" && error.httpStatus === 404,
+    );
+    assert.equal(calls, 1);
+  } finally {
+    await close(server);
+  }
+});
+
+for (const operation of ["history", "view"]) {
+  test(`${operation} aborts a stuck execution request through AbortSignal`, async () => {
+    let markReceived;
+    const received = new Promise((resolve) => {
+      markReceived = resolve;
+    });
+    const { server, port } = await listen(() => markReceived());
+    const comfy = createComfyClient({ baseUrl: `http://127.0.0.1:${port}`, retryAttempts: 1 });
+    const controller = new AbortController();
+    try {
+      const pending = operation === "history"
+        ? comfy.history("abc", { signal: controller.signal })
+        : comfy.view({ filename: "out.png" }, { signal: controller.signal });
+      await received;
+      controller.abort("user-stop");
+      await assert.rejects(pending, (error) => error.code === "comfy_aborted");
+    } finally {
+      await close(server);
+    }
+  });
+}
+
+test("interrupt and cancel propagate downstream cancellation failures", async () => {
+  const { server, port } = await listen((req, res) => {
+    if (req.url === "/queue") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end("{}");
+      return;
+    }
+    res.writeHead(500, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: "injected interrupt failure" }));
+  });
+  const comfy = createComfyClient({ baseUrl: `http://127.0.0.1:${port}`, retryAttempts: 1 });
+  try {
+    await assert.rejects(comfy.interrupt("abc"), (error) => error.code === "comfy_http_error" && error.message.includes("injected interrupt failure"));
+    await assert.rejects(comfy.cancel("abc"), (error) => error.code === "comfy_http_error" && error.message.includes("injected interrupt failure"));
+  } finally {
+    await close(server);
+  }
+});
