@@ -275,17 +275,9 @@ function comfyPortCandidates(cfg) {
     if (!ports.includes(port)) ports.push(port);
   };
   add(portFromUrl(cfg.comfyUrl));
-  // 隔离试跑补丁（本机 2026-11-26 重打，升级 v0.25.3 后恢复）：COMFY_PORT_SCAN_ONLY=1 时只认
-  // comfyUrl + COMFY_PORT_SCAN，不再扫描 8188–8199 / 8000 / 7860 / 8080 / 8888 / 18000，
-  // 避免误接管 MR(8188) 或无涯(8192) 的 ComfyUI。
-  const scanOnly = parsePortSpec(process.env.COMFY_PORT_SCAN);
-  if (process.env.COMFY_PORT_SCAN_ONLY === "1") {
-    for (const port of scanOnly) add(port);
-    return ports;
-  }
   add(COMFY_PORT_FIRST);
   for (const port of EXTRA_COMFY_PORTS) add(port);
-  for (const port of scanOnly) add(port);
+  for (const port of parsePortSpec(process.env.COMFY_PORT_SCAN)) add(port);
   for (let port = COMFY_PORT_FIRST + 1; port <= COMFY_PORT_LAST; port += 1) add(port);
   return ports;
 }

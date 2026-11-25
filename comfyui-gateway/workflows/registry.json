@@ -3748,6 +3748,254 @@
       }
     },
     {
+      "id": "video-hyperflow-ref2va-6p2",
+      "name": "video-hyperflow-ref2va-6p2",
+      "type": "video",
+      "file": "video-hyperflow-ref2va-6p2.json",
+      "description": "HyperFlow H3 Flash INT8 · 文生 / 首尾帧 / 多参三模式 · 8 步 schedule（6 低清 / 2 高清 SelfLift）· 画布 Sage/Sol/TRT VAE/T8；模式内切换，不换模型。",
+      "defaults": {
+        "76.strict_prompt_tags": false
+      },
+      "bindings": {
+        "width": {
+          "node": "76",
+          "input": "width",
+          "from": "size.width",
+          "transform": "snap32",
+          "default": 1344
+        },
+        "height": {
+          "node": "76",
+          "input": "height",
+          "from": "size.height",
+          "transform": "snap32",
+          "default": 768
+        },
+        "length": {
+          "node": "76",
+          "input": "length",
+          "from": "seconds",
+          "transform": "secondsToFrames17",
+          "fps": 24,
+          "default": 124
+        },
+        "prompt": {
+          "node": "76",
+          "input": "prompt"
+        },
+        "seed": {
+          "node": "78",
+          "input": "seed",
+          "from": "params.seed",
+          "transform": "int",
+          "random": true
+        },
+        "steps": {
+          "node": "74",
+          "input": "steps",
+          "from": "params.steps",
+          "transform": "int",
+          "default": 8
+        },
+        "cfg": {
+          "node": "78",
+          "input": "cfg",
+          "from": "params.cfg",
+          "default": 1
+        },
+        "transition_step": {
+          "node": "78",
+          "input": "transition_step",
+          "from": "params.transition_step",
+          "transform": "int",
+          "default": 6
+        },
+        "lowres_scale": {
+          "node": "78",
+          "input": "lowres_scale",
+          "from": "params.lowres_scale",
+          "default": 0.6
+        },
+        "rho": {
+          "node": "78",
+          "input": "rho",
+          "from": "params.rho",
+          "default": 0
+        },
+        "w_min": {
+          "node": "78",
+          "input": "w_min",
+          "from": "params.w_min",
+          "default": 0.3
+        },
+        "w_max": {
+          "node": "78",
+          "input": "w_max",
+          "from": "params.w_max",
+          "default": 1
+        },
+        "task_type_text": {
+          "node": "76",
+          "input": "task_type",
+          "modes": [
+            "text"
+          ],
+          "default": "auto"
+        },
+        "task_type_frames": {
+          "node": "76",
+          "input": "task_type",
+          "modes": [
+            "frames"
+          ],
+          "from": "params.frameMode",
+          "map": {
+            "first": "I2VA",
+            "last": "L2VA",
+            "both": "FL2VA"
+          },
+          "default": "FL2VA"
+        },
+        "task_type_reference": {
+          "node": "76",
+          "input": "task_type",
+          "modes": [
+            "reference"
+          ],
+          "default": "Ref2VA"
+        },
+        "frames": {
+          "node": "76",
+          "input": "first_frame",
+          "from": "image",
+          "frameMode": true,
+          "firstInput": "first_frame",
+          "lastInput": "last_frame",
+          "max": 2,
+          "modes": [
+            "frames"
+          ]
+        },
+        "refs": {
+          "node": "76",
+          "input": "ref_images",
+          "from": "image",
+          "array": true,
+          "inputPrefix": "ref_images.ref_image_",
+          "min": 0,
+          "max": 6,
+          "modes": [
+            "reference"
+          ]
+        },
+        "videos": {
+          "node": "76",
+          "input": "ref_videos",
+          "from": "video",
+          "array": true,
+          "inputPrefix": "ref_videos.ref_video_",
+          "audioPrefix": "ref_video_audios.ref_video_audio_",
+          "min": 0,
+          "max": 1,
+          "loadType": "video",
+          "modes": [
+            "reference"
+          ]
+        },
+        "audios": {
+          "node": "76",
+          "input": "ref_audios",
+          "from": "audio",
+          "array": true,
+          "inputPrefix": "ref_audios.ref_audio_",
+          "min": 0,
+          "max": 2,
+          "loadType": "audio",
+          "modes": [
+            "reference"
+          ]
+        }
+      },
+      "parameters": [
+        {
+          "key": "seed",
+          "label": "种子",
+          "type": "number",
+          "min": 1,
+          "max": 2147483647,
+          "step": 1,
+          "description": "留空则每次随机"
+        },
+        {
+          "key": "steps",
+          "label": "步数",
+          "type": "number",
+          "min": 4,
+          "max": 8,
+          "step": 2,
+          "default": 8,
+          "description": "HyperFlow 仅支持 4/6/8；8 = 6 低清 + 2 高清"
+        },
+        {
+          "key": "cfg",
+          "label": "CFG",
+          "type": "number",
+          "min": 1,
+          "max": 10,
+          "step": 0.1,
+          "default": 1
+        },
+        {
+          "key": "transition_step",
+          "label": "SelfLift 低清步数",
+          "type": "number",
+          "min": 1,
+          "max": 7,
+          "step": 1,
+          "default": 6,
+          "description": "8 步时最大 7"
+        },
+        {
+          "key": "lowres_scale",
+          "label": "SelfLift 低清比例",
+          "type": "number",
+          "min": 0.25,
+          "max": 1,
+          "step": 0.05,
+          "default": 0.6
+        },
+        {
+          "key": "rho",
+          "label": "SelfLift 锚点校正",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "default": 0
+        },
+        {
+          "key": "w_min",
+          "label": "SelfLift w_min",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "default": 0.3
+        },
+        {
+          "key": "w_max",
+          "label": "SelfLift w_max",
+          "type": "number",
+          "min": 0,
+          "max": 1,
+          "step": 0.05,
+          "default": 1
+        }
+      ],
+      "label": "H3（HyperFlow 6+2）",
+      "lora": null
+    },
+    {
       "id": "image-moss-sft-12step",
       "name": "image-moss-sft-12step",
       "type": "image",
@@ -3976,443 +4224,6 @@
       "presets": {},
       "parameters": [],
       "lora": null
-    },
-    {
-      "id": "video-hyperflow-ref2va-6p2",
-      "name": "video-hyperflow-ref2va-6p2",
-      "type": "video",
-      "description": "",
-      "file": "video-hyperflow-ref2va-6p2.json",
-      "bindings": {
-        "width": {
-          "node": "76",
-          "input": "width",
-          "from": "size.width",
-          "default": 1344,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "76",
-          "input": "height",
-          "from": "size.height",
-          "default": 768,
-          "transform": "snap32"
-        },
-        "length": {
-          "node": "76",
-          "input": "length",
-          "from": "seconds",
-          "transform": "secondsToFrames17",
-          "fps": 24,
-          "default": 124
-        },
-        "prompt": {
-          "node": "76",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.881Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\hyperflow-ref2va-6p2.json"
-      }
-    },
-    {
-      "id": "image-krea2-turbo-2",
-      "name": "image-krea2-turbo-2",
-      "type": "image",
-      "description": "",
-      "file": "image-krea2-turbo-2.json",
-      "bindings": {
-        "prompt": {
-          "node": "4",
-          "input": "text"
-        },
-        "negative": {
-          "node": "5",
-          "input": "text",
-          "default": ""
-        },
-        "width": {
-          "node": "6",
-          "input": "width",
-          "from": "size.width",
-          "default": 1024
-        },
-        "height": {
-          "node": "6",
-          "input": "height",
-          "from": "size.height",
-          "default": 1024
-        },
-        "batch": {
-          "node": "6",
-          "input": "batch_size",
-          "from": "count",
-          "default": 1
-        },
-        "seed": {
-          "node": "7",
-          "input": "seed",
-          "random": true
-        },
-        "steps": {
-          "node": "7",
-          "input": "steps",
-          "from": "quality.steps",
-          "default": 8
-        },
-        "cfg": {
-          "node": "7",
-          "input": "cfg",
-          "from": "quality.cfg",
-          "default": 1
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.896Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\image-krea2-turbo.json"
-      }
-    },
-    {
-      "id": "video-hyperflow-ref2va-6p2-2",
-      "name": "video-hyperflow-ref2va-6p2-2",
-      "type": "video",
-      "description": "",
-      "file": "video-hyperflow-ref2va-6p2-2.json",
-      "bindings": {
-        "width": {
-          "node": "76",
-          "input": "width",
-          "from": "size.width",
-          "default": 1344,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "76",
-          "input": "height",
-          "from": "size.height",
-          "default": 768,
-          "transform": "snap32"
-        },
-        "length": {
-          "node": "76",
-          "input": "length",
-          "from": "seconds",
-          "transform": "secondsToFrames17",
-          "fps": 24,
-          "default": 124
-        },
-        "prompt": {
-          "node": "76",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.911Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\video-hyperflow-ref2va-6p2-2.json"
-      }
-    },
-    {
-      "id": "video-image-ph3-image-edit-2",
-      "name": "video-image-ph3-image-edit-2",
-      "type": "video",
-      "description": "",
-      "file": "video-image-ph3-image-edit-2.json",
-      "bindings": {
-        "seed": {
-          "node": "9",
-          "input": "noise_seed",
-          "random": true
-        },
-        "width": {
-          "node": "5",
-          "input": "width",
-          "from": "size.width",
-          "default": 0,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "5",
-          "input": "height",
-          "from": "size.height",
-          "default": 0,
-          "transform": "snap32"
-        },
-        "prompt": {
-          "node": "5",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.925Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\video-image-ph3-image-edit-2.json"
-      }
-    },
-    {
-      "id": "video-image-ph3-image-edit-3",
-      "name": "video-image-ph3-image-edit-3",
-      "type": "video",
-      "description": "",
-      "file": "video-image-ph3-image-edit-3.json",
-      "bindings": {
-        "seed": {
-          "node": "9",
-          "input": "noise_seed",
-          "random": true
-        },
-        "width": {
-          "node": "5",
-          "input": "width",
-          "from": "size.width",
-          "default": 0,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "5",
-          "input": "height",
-          "from": "size.height",
-          "default": 0,
-          "transform": "snap32"
-        },
-        "prompt": {
-          "node": "5",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.944Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\video-image-ph3-image-edit-3.json"
-      }
-    },
-    {
-      "id": "video-image-ph3-image-edit-4",
-      "name": "video-image-ph3-image-edit-4",
-      "type": "video",
-      "description": "",
-      "file": "video-image-ph3-image-edit-4.json",
-      "bindings": {
-        "seed": {
-          "node": "9",
-          "input": "noise_seed",
-          "random": true
-        },
-        "width": {
-          "node": "5",
-          "input": "width",
-          "from": "size.width",
-          "default": 0,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "5",
-          "input": "height",
-          "from": "size.height",
-          "default": 0,
-          "transform": "snap32"
-        },
-        "prompt": {
-          "node": "5",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.957Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\video-image-ph3-image-edit-4.json"
-      }
-    },
-    {
-      "id": "video-image-ph3-image-t2i-2",
-      "name": "video-image-ph3-image-t2i-2",
-      "type": "video",
-      "description": "",
-      "file": "video-image-ph3-image-t2i-2.json",
-      "bindings": {
-        "seed": {
-          "node": "9",
-          "input": "noise_seed",
-          "random": true
-        },
-        "width": {
-          "node": "5",
-          "input": "width",
-          "from": "size.width",
-          "default": 2048,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "5",
-          "input": "height",
-          "from": "size.height",
-          "default": 2048,
-          "transform": "snap32"
-        },
-        "prompt": {
-          "node": "5",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.970Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\video-image-ph3-image-t2i-2.json"
-      }
-    },
-    {
-      "id": "video-image-ph3-image-t2i-3",
-      "name": "video-image-ph3-image-t2i-3",
-      "type": "video",
-      "description": "",
-      "file": "video-image-ph3-image-t2i-3.json",
-      "bindings": {
-        "seed": {
-          "node": "9",
-          "input": "noise_seed",
-          "random": true
-        },
-        "width": {
-          "node": "5",
-          "input": "width",
-          "from": "size.width",
-          "default": 2048,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "5",
-          "input": "height",
-          "from": "size.height",
-          "default": 2048,
-          "transform": "snap32"
-        },
-        "prompt": {
-          "node": "5",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.984Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\video-image-ph3-image-t2i-3.json"
-      }
-    },
-    {
-      "id": "video-image-ph3-image-t2i-4",
-      "name": "video-image-ph3-image-t2i-4",
-      "type": "video",
-      "description": "",
-      "file": "video-image-ph3-image-t2i-4.json",
-      "bindings": {
-        "seed": {
-          "node": "9",
-          "input": "noise_seed",
-          "random": true
-        },
-        "width": {
-          "node": "5",
-          "input": "width",
-          "from": "size.width",
-          "default": 2048,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "5",
-          "input": "height",
-          "from": "size.height",
-          "default": 2048,
-          "transform": "snap32"
-        },
-        "prompt": {
-          "node": "5",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:20.998Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\video-image-ph3-image-t2i-4.json"
-      }
-    },
-    {
-      "id": "video-image-ph3-image-t2i",
-      "name": "video-image-ph3-image-t2i",
-      "type": "video",
-      "description": "",
-      "file": "video-image-ph3-image-t2i.json",
-      "bindings": {
-        "seed": {
-          "node": "9",
-          "input": "noise_seed",
-          "random": true
-        },
-        "width": {
-          "node": "5",
-          "input": "width",
-          "from": "size.width",
-          "default": 2048,
-          "transform": "snap32"
-        },
-        "height": {
-          "node": "5",
-          "input": "height",
-          "from": "size.height",
-          "default": 2048,
-          "transform": "snap32"
-        },
-        "prompt": {
-          "node": "5",
-          "input": "prompt"
-        }
-      },
-      "defaults": {},
-      "presets": {},
-      "parameters": [],
-      "lora": null,
-      "importedAt": "2026-11-25T21:28:21.012Z",
-      "source": {
-        "kind": "path",
-        "path": "I:\\无界画布\\app\\comfyui-gateway\\workflows\\video-image-ph3-image-t2i.json"
-      }
     }
   ]
 }

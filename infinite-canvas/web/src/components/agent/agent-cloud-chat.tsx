@@ -1,31 +1,37 @@
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { App, Button, Popconfirm, Popover, Tooltip } from "antd";
-import { Bot, Gauge, LoaderCircle, MessagesSquare, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { Bot, Gauge, LoaderCircle, MessagesSquare, Plus, Power, RefreshCw, ShieldCheck, Terminal, Trash2, Wifi, WifiOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
+import { LOCAL_GATEWAY_BASE_URL } from "@/constant/app-mode";
+import { gatewayFetch } from "@/services/api/gateway-status";
+import { streamPiAgentChat } from "@/services/api/assistant-chat";
+import { syncAgentProvider } from "@/services/api/agent-provider";
 import { AgentChatComposer } from "./agent-chat-composer";
 import { AgentChatMessage, AgentPendingToolCard, type AgentChatAttachment, type AgentChatMessageItem } from "./agent-chat-message";
+import { isSiteTool, runSiteTool } from "@/lib/agent/agent-site-tools";
 import { summarizeCanvasAgentOps, type CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
+import addFreeWorkflowSkill from "../../../../.agents/skills/add-free-workflow/SKILL.md?raw";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { useEffectiveCardSkin } from "@/lib/canvas/use-canvas-theme";
 import { readImageMeta } from "@/lib/image-utils";
 import { useAgentChatStore } from "@/stores/use-agent-chat-store";
 import { useAgentStore } from "@/stores/use-agent-store";
-import { agentCloudLabel, formatAgentApiError, selectAgentBackend } from "@/lib/agent/agent-runtime";
-import { syncAgentProvider } from "@/services/api/agent-provider";
-import { resolvePiAgentUrl, streamPiAgentChat } from "@/services/api/assistant";
-import { ensureAssistantRuntime, fetchAssistantRuntimeStatus, type AssistantRuntimeStatus } from "@/services/api/resources";
+import { PI_AGENT_BASE_URL, PI_AGENT_DEV_MODEL, PI_AGENT_NORMAL_MODEL, useDevAgentStore } from "@/stores/use-dev-agent-store";
 import { activePromptCloudApi, modelOptionLabel, modelOptionName, selectableModelsByCapability, useConfigStore } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 type CloudAttachment = AgentChatAttachment & { dataUrl: string; mimeType: string; size: number };
+type ExternalTask = { skillText?: string; context?: string };
 type ApiMessage = { role: "system" | "user" | "assistant" | "tool"; content?: unknown; tool_calls?: unknown[]; tool_call_id?: string; name?: string };
 type ToolCall = { id?: string; function?: { name?: string; arguments?: string } };
 
 const MAX_ATTACHMENTS = 6;
 const MAX_PAYLOAD_BYTES = 30 * 1024 * 1024;
 const MAX_TOOL_STEPS = 8;
+const TASK_TOOL_STEPS = 32;
+const GATEWAY_ROOT = LOCAL_GATEWAY_BASE_URL.replace(/\/v1\/?$/, "");
 
 function readFileDataUrl(file: File) {
     return new Promise<string>((resolve, reject) => {
@@ -39,6 +45,11 @@ function readFileDataUrl(file: File) {
 function chatEndpoint(baseUrl: string) {
     const base = baseUrl.trim().replace(/\/+$/, "");
     return /\/chat\/completions$/i.test(base) ? base : `${base}/chat/completions`;
+}
+
+function devChatBase(baseUrl: string) {
+    const base = baseUrl.trim().replace(/\/+$/, "");
+    return /\/v1$/i.test(base) ? base : `${base}/v1`;
 }
 
 function messageContentText(value: unknown) {
@@ -61,27 +72,23 @@ async function requestChatStream(params: {
     model: string;
     messages: ApiMessage[];
     signal: AbortSignal;
+    toolsEnabled?: boolean;
     onDelta?: (delta: StreamDelta) => void;
 }): Promise<ChatReply> {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
     if (params.apiKey) headers.Authorization = `Bearer ${params.apiKey}`;
-    const body: Record<string, unknown> = { model: params.model, messages: params.messages, tools: cloudTools(), tool_choice: "auto", temperature: 0.4, stream: true };
+    const body: Record<string, unknown> = { model: params.model, messages: params.messages, temperature: 0.4, stream: true, ...(params.toolsEnabled === false ? {} : { tools: cloudTools(), tool_choice: "auto" }) };
     const response = await fetch(chatEndpoint(params.baseUrl), {
         method: "POST",
         headers,
         body: JSON.stringify(body),
         signal: params.signal,
     });
-    if (!response.ok) throw new Error(formatAgentApiError(response.status, await response.text()));
+    if (!response.ok) throw new Error((await response.text()) || `HTTP ${response.status}`);
     const contentType = response.headers.get("content-type") || "";
     if (!response.body || !contentType.includes("text/event-stream")) {
         const text = await response.text();
-        let data: { choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: ToolCall[] } }> };
-        try {
-            data = JSON.parse(text) as typeof data;
-        } catch {
-            throw new Error(formatAgentApiError(response.status, text));
-        }
+        const data = JSON.parse(text) as { choices?: Array<{ message?: { content?: unknown; reasoning_content?: unknown; reasoning?: unknown; tool_calls?: ToolCall[] } }> };
         const reply = data.choices?.[0]?.message;
         if (!reply) throw new Error("API 没有返回消息。");
         const reasoning = replyReasoningText(reply);
@@ -214,7 +221,7 @@ function canvasFeatureCatalog() {
                 id: "video",
                 name: "视频工具",
                 entry: "视频卡悬浮工具 / 视频工作台",
-                tools: ["首尾帧 / 全能参考模式", "视频超分（SeedVR2）", "RIFE 插帧 2×/3×", "H3 角色替换", "极速草稿", "对比", "同步播放"],
+                tools: ["首尾帧 / 全能参考模式", "视频超分（SeedVR2 / RelayVSR 2×）", "RIFE 插帧 2×/3×", "H3 角色替换", "极速草稿", "对比", "同步播放"],
                 draft: "极速草稿用首尾帧快速预览，最终成片仍用 VDN 或多参工作流",
             },
             {
@@ -334,77 +341,23 @@ export function AgentCloudChat() {    const { t } = useTranslation();
     const [pending, setPending] = useState<{ summary: string; resolve: (approved: boolean) => void } | null>(null);
     const [settingsOpen, setSettingsOpen] = useState(false);
     const [error, setError] = useState("");
-    const [piUrl, setPiUrl] = useState(() => (typeof window === "undefined" ? "" : localStorage.getItem("canvas-pi-agent-url") || ""));
-    const [piStatus, setPiStatus] = useState<AssistantRuntimeStatus | null>(null);
-    const [piInstalling, setPiInstalling] = useState(false);
-    const piEnsureAttemptedRef = useRef(false);
     const apiMessagesRef = useRef<ApiMessage[]>([]);
     const listRef = useRef<HTMLDivElement>(null);
     const abortRef = useRef<AbortController | null>(null);
     const pendingRef = useRef<{ resolve: (approved: boolean) => void } | null>(null);
     const attachmentUrlsRef = useRef(new Set<string>());
     const scrollTimerRef = useRef<number | null>(null);
-    const queueRef = useRef<Array<{ text: string; attachments: CloudAttachment[] }>>([]);
+    const queueRef = useRef<Array<{ text: string; attachments: CloudAttachment[]; task?: ExternalTask }>>([]);
+    const sendingRef = useRef(false);
+    const runChatRef = useRef<((text: string, attachments: CloudAttachment[], task?: ExternalTask) => Promise<void>) | null>(null);
     const [queueCount, setQueueCount] = useState(0);
+    const [launchingAgent, setLaunchingAgent] = useState(false);
+    const [launchError, setLaunchError] = useState("");
     const confirmTools = useAgentStore((state) => state.confirmTools);
     const skin = useEffectiveCardSkin() as string;
-    const openConfigDialog = useConfigStore((state) => state.openConfigDialog);
-    const backend = selectAgentBackend(piUrl, api);
-    const cloudApi = backend.source === "none" ? null : api;
-    const runtime = api?.baseUrl?.trim() && api?.apiKey?.trim() && api?.model?.trim()
-        ? { baseUrl: api.baseUrl.trim(), apiKey: api.apiKey.trim(), model: api.model.trim(), label: agentCloudLabel(api) }
-        : null;
-    const runtimeLabel = backend.source === "pi" ? `pi Agent · ${cloudApi?.model || ""}`.trim() : runtime?.label || t("agent.cloud.noApiTitle");
-    const runtimeModel = cloudApi?.model || "—";
-    const cloudReady = backend.source === "cloud";
+    const devAgent = useDevAgentStore();
+    const devEnabled = devAgent.enabled;
 
-    const refreshPi = useCallback(async () => {
-        try {
-            let status = await fetchAssistantRuntimeStatus();
-            if (!status.running && status.available && !piEnsureAttemptedRef.current) {
-                piEnsureAttemptedRef.current = true;
-                try {
-                    await ensureAssistantRuntime(false);
-                    status = await fetchAssistantRuntimeStatus();
-                } catch {
-                    // 保持 status 的可读状态；不自动下载运行时。
-                }
-            }
-            setPiStatus(status);
-            const nextUrl = status.running && status.online && status.url ? status.url : "";
-            setPiUrl(nextUrl);
-            if (nextUrl) localStorage.setItem("canvas-pi-agent-url", nextUrl);
-            else localStorage.removeItem("canvas-pi-agent-url");
-        } catch {
-            setPiStatus(null);
-            setPiUrl("");
-        }
-    }, []);
-
-    useEffect(() => {
-        void refreshPi();
-        const timer = window.setInterval(() => void refreshPi(), 5000);
-        return () => window.clearInterval(timer);
-    }, [refreshPi]);
-
-    const installPi = async () => {
-        setPiInstalling(true);
-        setError("");
-        try {
-            await ensureAssistantRuntime(!piStatus?.runtimePackagePresent);
-            piEnsureAttemptedRef.current = true;
-            await refreshPi();
-        } catch (reason) {
-            setError(reason instanceof Error ? reason.message : String(reason));
-        } finally {
-            setPiInstalling(false);
-        }
-    };
-
-    useEffect(() => {
-        if (!cloudApi) return;
-        void syncAgentProvider({ baseUrl: cloudApi.baseUrl.trim(), apiKey: cloudApi.apiKey.trim(), model: cloudApi.model.trim(), label: cloudApi.name }).catch(() => undefined);
-    }, [cloudApi?.id, cloudApi?.baseUrl, cloudApi?.apiKey, cloudApi?.model]);
     useEffect(() => {
         const state = useAgentStore.getState();
         if (state.canvasReferences.length || state.attachments.length) state.setAgentState({ canvasReferences: [], attachments: [] });
@@ -416,6 +369,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
         };
     }, []);
     useEffect(() => {
+        sendingRef.current = sending;
         useAgentStore.getState().setAgentState({ sending, waiting: sending });
     }, [sending]);
     useEffect(() => {
@@ -435,6 +389,9 @@ export function AgentCloudChat() {    const { t } = useTranslation();
         }
         useAgentChatStore.getState().saveMessages(activeId, messages);
     }, [messages, sending, activeId]);
+    useEffect(() => {
+        void testDevConnection();
+    }, []);
     useEffect(() => {
         if (scrollTimerRef.current !== null) return;
         scrollTimerRef.current = window.setTimeout(() => {
@@ -498,6 +455,45 @@ export function AgentCloudChat() {    const { t } = useTranslation();
         useAgentStore.getState().setAgentState({ confirmTools: next });
     };
 
+    const testDevConnection = async () => {
+        const store = useDevAgentStore.getState();
+        store.setStatus("checking");
+        try {
+            const statusResponse = await gatewayFetch(`${GATEWAY_ROOT}/api/assistant/status`, { headers: { Accept: "application/json" } });
+            const statusData = (await statusResponse.json().catch(() => ({}))) as { online?: boolean; url?: string; reason?: string; error?: string };
+            if (!statusResponse.ok || !statusData.online || !statusData.url) {
+                throw new Error(String(statusData.error || statusData.reason || "pi Agent 未连接"));
+            }
+            store.setBaseUrl(String(statusData.url).trim().replace(/\/+$/, ""));
+            store.setStatus("connected");
+        } catch (err) {
+            store.setStatus("error", err instanceof Error ? err.message : String(err));
+        }
+    };
+
+    const launchAgent = async () => {
+        if (launchingAgent) return;
+        setLaunchingAgent(true);
+        setLaunchError("");
+        try {
+            const response = await gatewayFetch(`${GATEWAY_ROOT}/api/assistant/ensure`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Accept: "application/json" },
+                body: "{}",
+            });
+            const data = (await response.json().catch(() => ({}))) as { ok?: boolean; url?: string; error?: string; needFullPackage?: boolean };
+            if (!response.ok || data.ok === false) throw new Error(data.error || (data.needFullPackage ? "需要完整包安装 Agent 运行时" : "拉起 Agent 失败"));
+            if (data.url) useDevAgentStore.getState().setBaseUrl(String(data.url));
+            await testDevConnection();
+            const after = useDevAgentStore.getState();
+            if (after.status !== "connected") throw new Error(after.error || "运行时已启动，但连接检测失败");
+        } catch (error) {
+            setLaunchError(error instanceof Error ? error.message : "拉起 Agent 失败");
+        } finally {
+            setLaunchingAgent(false);
+        }
+    };
+
     const executeTool = async (name: string, input: Record<string, unknown>) => {
         if (name === "canvas_get_state") return compactCanvasState();
         if (name === "canvas_get_features") return canvasFeatureCatalog();
@@ -525,14 +521,20 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 message: ops.some((op) => op.type === "run_generation") ? "已触发生成，任务在画布中运行。" : "画布已更新。",
             };
         }
+        if (isSiteTool(name)) {
+            try {
+                return await runSiteTool(name, input, navigate, { canvasSnapshot: useAgentStore.getState().canvasContext?.snapshot || null });
+            } catch (error) {
+                return { error: error instanceof Error ? error.message : String(error) };
+            }
+        }
         return { error: `未知工具：${name}` };
     };
 
-    const runChat = async (userText: string, userAttachments: CloudAttachment[]) => {
-        if (!runtime) {
-            openConfigDialog(false, "cloud-api");
-            return;
-        }
+    const runChat = async (userText: string, userAttachments: CloudAttachment[], task?: ExternalTask) => {
+        const devState = useDevAgentStore.getState();
+        const useDev = devState.enabled;
+        const runtime = { baseUrl: devChatBase(useDevAgentStore.getState().baseUrl || PI_AGENT_BASE_URL), apiKey: "", model: useDev ? PI_AGENT_DEV_MODEL : PI_AGENT_NORMAL_MODEL };
         setError("");
         setSending(true);
         const controller = new AbortController();
@@ -546,11 +548,26 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             : skin === "angel"
               ? "角色设定：你当前使用皮肤角色「天使娘」，是用户的画布助手。用户打招呼、问你是谁或需要自我介绍时，用天使娘的口吻回答，例如“我是天使娘，你的画布助手。想做点什么？”不要自称通用 AI 助手。"
               : "角色设定：当前没有角色皮肤。用户打招呼、问你是谁或需要自我介绍时，自称“无界画布的 AI 助手”。";
-        const boundaryRule = "当前运行在云端 API 上：只有对话、画布读取和画布工具，不能读写本地文件或运行命令。用户要求改代码、新增卡片类型、修改卡片 UI 或增加参数控件时，说明需要使用画布助手卡，不要声称已经修改代码。区域布局、局部编辑、四视图、提示词优化/反推、超分/插帧是独立 UI，说明入口即可，不要声称已执行。";
+        const boundaryRule = useDev
+            ? "当前已打开开发者模式：你运行在外挂 pi Agent 上，工作区是画布项目仓库。你可以直接读写仓库文件、运行命令，也可以调用画布工具。用户要求新增卡片类型、修改卡片 UI、增加参数控件或改前端架构时，直接读源码并修改，不要说“没有权限”。先读再改，只改必要文件；改完按需运行 typecheck/build（用户说不用则跳过）。"
+            : "当前是普通模式：你运行在 pi Agent 上，只有画布操作和只读能力，不能写文件或运行命令。用户要求改代码、新增卡片类型、修改卡片 UI 或增加参数控件时，告诉用户打开「开发者模式」，不要声称已经修改代码。区域布局、局部编辑、四视图、提示词优化/反推、超分/插帧是独立 UI，说明入口即可，不要声称已执行。";
+        const taskPrompt = task
+            ? [
+                  "【本轮任务：add-free-workflow】严格按下面技能说明执行；成功定义=真正建出自由卡且 G6 校验通过，不是“条目出现”。",
+                  task.context ? `【任务上下文】${task.context}` : "",
+                  "【工具差异】本路径画布工具只有 canvas_get_state 和 canvas_apply_ops（连线用 ops 里的 connect_nodes）；free_workflow_* 工具均已提供，建卡用 free_workflow_create_card；不要调用 archive/snapshot/open。",
+                  "【执行纪律】每个工具最多调用一次；health 最多 2 次（首检 + sync changed 后复检），sync 最多 1 次，graph 最多 2 次。G3 issues>0 或缺节点/模型时立即停止、不再 sync/重试，直接给修复路径，也不要建卡。G6 valid=true 后立刻调用 free_workflow_create_card 并输出报告，不要再列源/体检/读图。禁止为了“确认”重复调用工具。",
+                  "【技能说明】",
+                  task.skillText || "",
+              ]
+                  .filter(Boolean)
+                  .join("\n")
+            : "";
         const systemPrompt = [
             "你是「无界画布」的画布助手，不是只做修复的工具。你可以读取和修改当前画布，也可以调用卡片生成。",
             personaRule,
             boundaryRule,
+            taskPrompt,
             "读取画布用 canvas_get_state；查询画布功能、入口和限制用 canvas_get_features；修改画布用 canvas_apply_ops。",
             "canvas_apply_ops 的 ops 支持：add_node、update_node、delete_node、delete_connections、connect_nodes、select_nodes、set_viewport、run_generation。",
             "add_node 示例：{\"type\":\"add_node\",\"id\":\"agent-img-1\",\"nodeType\":\"image\",\"metadata\":{\"prompt\":\"...\",\"model\":\"...\",\"size\":\"1:1\",\"count\":1,\"generationMode\":\"image\"}}，随后用 {\"type\":\"run_generation\",\"nodeId\":\"agent-img-1\"} 触发生成。",
@@ -560,7 +577,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             "模型必须严格匹配用户指定：Z Image 不能用 Krea2 或默认模型；列表里没有精确匹配时先问，不要自动替换。",
             "画布权限已放开：自动确认模式下 canvas_apply_ops 直接执行，不要用“没有权限”推辞画布内操作。除提示词外，你还可以改标题、位置、尺寸、模型，以及 metadata 里的生成参数（size、count、seed、seconds、vquality、videoMode、frameMode、imageMode、aspectRatio、params.loras 等）；先 canvas_get_state 读取 params，再 update_node 写回。",
             "可创建的卡片：文本、图片、配置、视频、音频、分组、自由卡片（free-card）、LoRA 卡（comfyui-lora:lora）。新建图片/视频卡后可用 connect_nodes 接 LoRA/参考/配置卡，再 run_generation。",
-            "步数由模型型号或档位决定，不是所有卡片都能通过 metadata 改；不要承诺给任意图片卡增加步数控件。",
+            useDev ? "步数控件可以作为前端改动直接实现：先确认要覆盖哪些模型，再改卡片 UI 和生成参数链路。" : "步数由模型型号或档位决定，不是所有卡片都能通过 metadata 改；不要承诺给任意图片卡增加步数控件。",
             "执行任何画布写入前先调用 canvas_get_state 获取真实节点 ID，不要编造 ID。",
             "画布功能索引（用户问具体功能时先调用 canvas_get_features 获取入口、步骤和限制，不要凭记忆说不知道或编造）：MOSS 区域布局、局部编辑（蒙版）、四视图、提示词优化/反推、裁剪、切图、放大、AI 超分、多角度、替换图片；视频首尾帧/全能参考、视频超分、RIFE 插帧、角色替换、极速草稿；风格配方、LoRA 叠层、自由卡片、资产库、提示词库。",
             "关键区分：MOSS 区域布局是在 MOSS 图上画多个区域并分别写提示词，背景先画、主体/文字后画，仅 MOSS 模型；局部编辑是用蒙版只改图片的一块区域。四视图是从角色图生成一张四视图设定图（固定 image-krea2-four-view），不是四张普通图，也不是多角度。",
@@ -574,7 +591,9 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             `当前页面：${location.pathname}。需要切换页面时用 site_navigate。`,
             "生成任务只是触发，未返回结果前不要声称已经生成完成。",
             "回答风格（重要）：语气可以轻松可爱，但必须简短、直接。默认 1-3 句话；复杂操作最多 3 个短点。不要复述用户的话，不要解释原理，不要列通用建议清单；只有用户明确说“详细/展开”才展开。功能问题只答入口+一句用法；操作完成只报结果和下一步。canvas_get_features 是给你自己查的，不要把整段贴给用户。",
-        ].join("\n");
+        ]
+            .filter(Boolean)
+            .join("\n");
         apiMessagesRef.current[0] = { role: "system", content: systemPrompt };
         const content: unknown = userAttachments.length
             ? [{ type: "text", text: userText || "请查看这些图片。" }, ...userAttachments.map((item) => ({ type: "image_url", image_url: { url: item.dataUrl } }))]
@@ -598,7 +617,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             setMessages((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
         };
         try {
-            for (let step = 0; step < MAX_TOOL_STEPS; step += 1) {
+            for (let step = 0; step < (task ? TASK_TOOL_STEPS : MAX_TOOL_STEPS); step += 1) {
                 let roundContent = "";
                 let roundReasoning = "";
                 const reply = await requestChatStream({
@@ -654,6 +673,40 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 liveId = null;
                 return;
             }
+            if (task) {
+                try {
+                    const summaryMessages: ApiMessage[] = [...apiMessagesRef.current, { role: "system", content: "工具步数已用完。请不要再调用工具，直接用中文总结：已完成到哪一步、卡片是否建出、未完成/阻塞点与下一步；不要提“工具调用次数限制”。" }];
+                    let summaryContent = "";
+                    const reply = await requestChatStream({
+                        baseUrl: runtime.baseUrl,
+                        apiKey: runtime.apiKey,
+                        model: runtime.model,
+                        messages: summaryMessages,
+                        signal: controller.signal,
+                        toolsEnabled: false,
+                        onDelta: (delta) => {
+                            if (delta.reasoning) {
+                                allReasoning += delta.reasoning;
+                                const id = ensureLive();
+                                patchLive({ reasoning: allReasoning, streamId: id });
+                            }
+                            if (delta.content) {
+                                summaryContent += delta.content;
+                                const id = ensureLive();
+                                patchLive({ text: summaryContent, streamId: id });
+                            }
+                        },
+                    });
+                    const summary = (reply.content || summaryContent).trim() || "本轮工具步数已用完；请查看上方工具结果决定下一步。";
+                    apiMessagesRef.current.push({ role: "assistant", content: summary });
+                    ensureLive();
+                    patchLive({ text: summary, reasoning: allReasoning || undefined, streamId: undefined });
+                    liveId = null;
+                    return;
+                } catch {
+                    // 总结调用失败时退回原有停止提示。
+                }
+            }
             ensureLive();
             patchLive({ text: "工具调用次数过多，已停止本轮操作。", reasoning: allReasoning || undefined, streamId: undefined });
             liveId = null;
@@ -665,10 +718,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             if (controller.signal.aborted) {
                 appendMessage({ role: "system", text: t("agent.runtime.taskStopped") });
             } else {
-                const raw = err instanceof Error ? err.message : String(err);
-                const sanitized = runtime.apiKey ? raw.split(runtime.apiKey).join("[已隐藏]") : raw;
-                const message = /failed to fetch|networkerror|load failed/i.test(sanitized) ? "无法连接 API：网络不可达或跨域被拦截。" : sanitized;
-                const text = `云 API：${message}`;
+                const text = err instanceof Error ? err.message : String(err);
                 setError(text);
                 appendMessage({ role: "error", text });
             }
@@ -677,21 +727,21 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             const next = queueRef.current.shift();
             setQueueCount(queueRef.current.length);
             if (next) {
-                void dispatch(next.text, next.attachments);
+                void runChat(next.text, next.attachments, next.task);
             } else {
                 setSending(false);
             }
         }
     };
 
-    const runPiChat = async (userText: string, userAttachments: CloudAttachment[]) => {
-        if (!cloudApi) {
-            openConfigDialog(false, "cloud-api");
+    const runPiChat = async (text: string, userAttachments: CloudAttachment[], task?: ExternalTask) => {
+        if (userAttachments.length) {
+            message.warning("pi Agent 暂不支持附件，请先移除图片");
             return;
         }
-        if (userAttachments.length) {
-            // pi Agent 桥只接收文本和画布上下文；有附件时使用云直连兜底。
-            void runChat(userText, userAttachments);
+        const url = useDevAgentStore.getState().baseUrl;
+        if (!url || !text.trim()) {
+            setError("pi Agent 未连接，请先拉起 Agent");
             return;
         }
         setError("");
@@ -702,10 +752,13 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             .filter((item) => (item.role === "user" || item.role === "assistant") && item.text.trim())
             .slice(-12)
             .map((item) => ({ role: item.role, content: item.text }));
-        appendMessage({ role: "user", text: userText });
+        appendMessage({ role: "user", text });
         setPrompt("");
+        setAttachments([]);
         let liveId: string | null = null;
         let content = "";
+        let streamError = "";
+        let finalText = "";
         const ensureLive = () => {
             if (liveId) return liveId;
             liveId = `pi-live-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
@@ -718,17 +771,34 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             const id = liveId;
             setMessages((current) => current.map((item) => (item.id === id ? { ...item, ...patch } : item)));
         };
+        const finishCanvasTool = async (data: Record<string, unknown>) => {
+            const callId = String(data.callId || "");
+            if (!callId) return;
+            let payload: Record<string, unknown>;
+            try {
+                const result = await executeTool(String(data.name || ""), (data.args || {}) as Record<string, unknown>);
+                payload = { callId, result };
+            } catch (error) {
+                payload = { callId, error: error instanceof Error ? error.message : String(error) };
+            }
+            await fetch(`${url.replace(/\/+$/, "")}/api/assistant/tool-result`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload),
+            }).catch(() => undefined);
+        };
         try {
-            await syncAgentProvider({ baseUrl: cloudApi.baseUrl.trim(), apiKey: cloudApi.apiKey.trim(), model: cloudApi.model.trim(), label: cloudApi.name }).catch(() => undefined);
-            const url = piUrl || (await resolvePiAgentUrl());
-            let streamError = "";
-            let finalText = "";
+            const cloud = activePromptCloudApi(useConfigStore.getState().config);
+            if (cloud?.baseUrl && cloud?.apiKey && cloud?.model) {
+                await syncAgentProvider({ baseUrl: cloud.baseUrl.trim(), apiKey: cloud.apiKey.trim(), model: cloud.model.trim(), label: cloud.name }).catch(() => undefined);
+            }
             await streamPiAgentChat(
                 url,
                 {
                     threadId: activeConversation?.id,
-                    message: userText,
+                    message: task?.context ? `${text}\n\n${task.context}` : text,
                     gatewayUrl: "",
+                    mode: devEnabled ? "developer" : "normal",
                     history,
                     context: compactCanvasState(),
                 },
@@ -744,6 +814,8 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                         } else if (event === "tool_start") {
                             const label = String(data.label || data.name || "工具");
                             appendMessage({ role: "tool", title: label, text: label });
+                        } else if (event === "canvas_tool") {
+                            void finishCanvasTool(data);
                         } else if (event === "error") {
                             streamError = String(data.message || "pi Agent 请求失败");
                         } else if (event === "done") {
@@ -758,7 +830,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             ensureLive();
             patchLive({ text: answer, streamId: undefined });
             liveId = null;
-        } catch (reason) {
+        } catch (error) {
             if (liveId) {
                 patchLive({ streamId: undefined });
                 liveId = null;
@@ -766,30 +838,44 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             if (controller.signal.aborted) {
                 appendMessage({ role: "system", text: t("agent.runtime.taskStopped") });
             } else {
-                const text = reason instanceof Error ? reason.message : String(reason);
-                setError(text);
-                appendMessage({ role: "error", text: `pi Agent：${text}` });
+                const messageText = error instanceof Error ? error.message : String(error);
+                setError(messageText);
+                appendMessage({ role: "error", text: messageText });
             }
         } finally {
             abortRef.current = null;
             const next = queueRef.current.shift();
             setQueueCount(queueRef.current.length);
             if (next) {
-                void dispatch(next.text, next.attachments);
+                void runPiChat(next.text, next.attachments, next.task);
             } else {
                 setSending(false);
             }
         }
     };
 
-    const dispatch = (text: string, userAttachments: CloudAttachment[]) => {
-        const selected = selectAgentBackend(piUrl, api);
-        if (selected.source === "pi") return void runPiChat(text, userAttachments);
-        return void runChat(text, userAttachments);
-    };
+    runChatRef.current = runPiChat;
+    useEffect(() => {
+        const onExternalSend = (event: Event) => {
+            const detail = (event as CustomEvent<{ text?: string; context?: string; skill?: string }>).detail || {};
+            const text = String(detail.text || "").trim();
+            if (!text) return;
+            const state = useAgentStore.getState();
+            if (!state.panelOpen) state.openPanel();
+            const task: ExternalTask = { skillText: detail.skill === "add-free-workflow" ? addFreeWorkflowSkill : undefined, context: String(detail.context || "") };
+            if (sendingRef.current) {
+                queueRef.current.push({ text, attachments: [], task });
+                setQueueCount(queueRef.current.length);
+                return;
+            }
+            void runChatRef.current?.(text, [], task);
+        };
+        window.addEventListener("qoder:agent-send", onExternalSend);
+        return () => window.removeEventListener("qoder:agent-send", onExternalSend);
+    }, []);
 
-    const canUse = backend.source !== "none";
-    const modelLabel = runtimeModel;
+    const canUse = devAgent.status === "connected";
+    const modelLabel = api?.model || "deepseek-flash";
     const contextChars = messages.reduce((total, item) => total + item.text.length + (item.reasoning?.length || 0), 0) + prompt.length;
     const contextTokens = Math.ceil(contextChars / 4);
     const snapshot = useAgentStore((state) => state.canvasContext?.snapshot);
@@ -806,7 +892,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
             message.success(t("agent.dev.queued", { count: queueRef.current.length }));
             return;
         }
-        void dispatch(text, attachments);
+        void runPiChat(text, attachments);
     };
     const stop = () => {
         pendingRef.current?.resolve(false);
@@ -862,13 +948,13 @@ export function AgentCloudChat() {    const { t } = useTranslation();
     const contextPanel = (
         <div className="w-64 space-y-1.5 text-xs" style={{ color: theme.node.text }}>
             {[
-                [t("agent.dev.contextAgent"), runtimeLabel],
+                [t("agent.dev.contextAgent"), "pi Agent"],
                 [t("agent.dev.contextModel"), modelLabel],
-                [t("agent.dev.contextMode"), backend.source === "pi" ? "pi Agent" : cloudReady ? t("agent.dev.cloudApi") : t("agent.cloud.noApiTitle")],
+                [t("agent.dev.contextMode"), devEnabled ? t("agent.dev.title") : t("agent.dev.normalMode")],
                 [t("agent.dev.contextSession"), `${activeConversation?.title || t("agent.dev.newChat")} · ${t("agent.dev.messages", { count: messages.length })}`],
                 [t("agent.dev.contextCanvas"), `${snapshot?.nodes.length || 0} ${t("agent.dev.nodes")} · ${snapshot?.connections.length || 0} ${t("agent.dev.connections")}`],
                 [t("agent.dev.contextTokens"), t("agent.dev.tokens", { count: contextTokens.toLocaleString() })],
-                [t("agent.dev.contextSkills"), t("agent.dev.skillsNormal")],
+                [t("agent.dev.contextSkills"), devEnabled ? t("agent.dev.skillsDev") : t("agent.dev.skillsNormal")],
             ].map(([label, value]) => (
                 <div key={String(label)} className="flex items-start justify-between gap-3">
                     <span className="shrink-0" style={{ color: theme.node.muted }}>{label}</span>
@@ -876,8 +962,15 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 </div>
             ))}
             <div className="pt-1 text-[11px] leading-5" style={{ color: theme.node.muted }}>{t("agent.dev.contextNote")}</div>
+            {devAgent.status === "error" ? (
+                <Button size="small" icon={<RefreshCw className="size-3.5" />} onClick={() => void testDevConnection()}>
+                    {t("agent.dev.retry")}
+                </Button>
+            ) : null}
         </div>
     );
+    const connectionLabel = devAgent.status === "checking" ? t("agent.dev.checking") : devAgent.status === "connected" ? t("agent.dev.connected") : devAgent.status === "error" ? `${t("agent.dev.error")}${devAgent.error ? `：${devAgent.error}` : ""}` : t("agent.dev.idle");
+    const agentError = launchError || (!launchingAgent && devAgent.status === "error" ? devAgent.error : "");
 
     return (
         <div className="flex h-full min-h-0 flex-col" style={{ color: theme.node.text }}>
@@ -887,10 +980,11 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 </span>
                 <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1.5 text-sm font-semibold leading-5">
-                        <span className="truncate" title={runtimeLabel}>{runtimeLabel}</span>
+                        <span>pi Agent</span>
+                        {devAgent.status === "connected" ? <Wifi className="size-3 text-green-600" /> : <WifiOff className="size-3" style={{ color: theme.node.muted }} />}
                     </div>
                     <div className="truncate text-[10px] leading-4" style={{ color: theme.node.muted }}>
-                        {activeConversation?.title || t("agent.dev.newChat")} · {backend.source === "pi" ? "pi Agent" : cloudReady ? t("agent.dev.cloudApi") : t("agent.cloud.noApiTitle")}
+                        {activeConversation?.title || t("agent.dev.newChat")} · {devEnabled ? t("agent.dev.title") : t("agent.dev.normalMode")}
                     </div>
                 </div>
                 <Popover trigger="click" placement="bottomRight" content={conversationMenu}>
@@ -907,10 +1001,34 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                     <Button type="text" size="small" className="!h-7 !w-7 !min-w-7 !px-0" icon={<ShieldCheck className="size-4" />} onClick={() => setSettingsOpen((open) => !open)} aria-label={t("agent.permissions.title")} />
                 </Tooltip>
             </div>
+            {devAgent.status !== "connected" ? (
+                <div className="shrink-0 border-b px-3 py-2" style={{ borderColor: theme.node.stroke, background: "rgba(220,38,38,.06)" }}>
+                    <button
+                        type="button"
+                        className="flex h-9 w-full items-center justify-center gap-2 rounded-lg text-sm font-semibold text-white shadow-[0_6px_18px_rgba(220,38,38,.28)] transition hover:brightness-110 disabled:cursor-wait disabled:opacity-80"
+                        style={{ background: "#dc2626" }}
+                        onClick={() => void launchAgent()}
+                        disabled={launchingAgent}
+                    >
+                        {launchingAgent ? <LoaderCircle className="size-4 animate-spin" /> : <Power className="size-4" />}
+                        {launchingAgent ? "正在拉起…" : agentError ? "重试拉起" : "拉起 Agent"}
+                    </button>
+                    {agentError ? <div className="mt-1.5 break-words text-[11px] leading-4" style={{ color: "#dc2626" }}>{agentError}</div> : null}
+                </div>
+            ) : null}
             {settingsOpen ? (
                 <div className="shrink-0 border-b px-4 py-2.5 text-xs" style={{ borderColor: theme.node.stroke, background: theme.node.fill }}>
+                    <AgentSettingToggle
+                        icon={<Terminal className="size-4" />}
+                        title={t("agent.dev.title")}
+                        description={t("agent.dev.description")}
+                        checked={devEnabled}
+                        theme={theme}
+                        onChange={() => devAgent.setEnabled(!devEnabled)}
+                    />
                     <div className="mt-1.5 text-[11px] leading-5" style={{ color: theme.node.muted }}>
-                        <span>{backend.source === "pi" ? `pi Agent：${cloudApi?.model || "—"} · ${t("agent.dev.skillsNormal")}` : runtime ? `${t("agent.dev.cloudApi")}：${runtime.label} · ${t("agent.dev.skillsNormal")}` : t("agent.cloud.noApiHint")}</span>
+                        <span style={{ color: devAgent.status === "error" ? "#dc2626" : devAgent.status === "connected" ? "#16a34a" : theme.node.muted }}>{connectionLabel}</span>
+                        {` · ${devEnabled ? t("agent.dev.skillsDev") : t("agent.dev.skillsNormal")}`}
                     </div>
                     <div className="mt-2">
                         <AgentSettingToggle
@@ -928,19 +1046,12 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 {!messages.length && !pending && !sending ? (
                     <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
                         <Bot className="size-8 opacity-35" />
-                        <div className="text-sm font-medium">{canUse ? t("agent.cloud.emptyTitle") : t("agent.cloud.noApiTitle")}</div>
-                        <div className="text-xs leading-5" style={{ color: theme.node.muted }}>{canUse ? t("agent.cloud.emptyHint") : t("agent.cloud.noApiHint")}</div>
+                        <div className="text-sm font-medium">{t("agent.cloud.emptyTitle")}</div>
+                        <div className="text-xs leading-5" style={{ color: theme.node.muted }}>{t("agent.cloud.emptyHint")}</div>
                         {!canUse ? (
-                            <div className="mt-2 flex flex-wrap justify-center gap-2">
-                                <Button type="primary" size="small" onClick={() => openConfigDialog(false, "cloud-api")}>
-                                    {t("agent.cloud.configureApi")}
-                                </Button>
-                                {piStatus && (!piStatus.runtimePackagePresent || !piStatus.available) ? (
-                                    <Button size="small" loading={piInstalling} onClick={() => void installPi()}>
-                                        {t("agent.cloud.installPi")}
-                                    </Button>
-                                ) : null}
-                            </div>
+                            <Button type="primary" size="small" className="mt-2" onClick={() => void testDevConnection()}>
+                                {t("agent.dev.retry")}
+                            </Button>
                         ) : null}
                     </div>
                 ) : null}
@@ -964,7 +1075,7 @@ export function AgentCloudChat() {    const { t } = useTranslation();
                 attachments={attachments.map(({ id, name, url }) => ({ id, name, url }))}
                 disabled={!canUse}
                 sending={sending}
-                placeholder={canUse ? t("agent.cloud.placeholder") : t("agent.cloud.noApiPlaceholder")}
+                placeholder={canUse ? (devEnabled ? t("agent.dev.placeholder") : t("agent.dev.placeholderNormal")) : t("agent.dev.disconnected")}
                 theme={theme}
                 onPromptChange={setPrompt}
                 onSubmit={submit}
@@ -1042,5 +1153,25 @@ function cloudTools() {
                 parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false },
             },
         },
+        ...freeWorkflowTools(),
+    ];
+}
+
+function freeWorkflowTools() {
+    const str = { type: "string" };
+    const strings = { type: "array", items: { type: "string" } };
+    const object = (properties: Record<string, unknown>, required: string[] = []) => ({ type: "object", properties, required, additionalProperties: true });
+    const tool = (name: string, description: string, parameters: Record<string, unknown>) => ({ type: "function", function: { name, description, parameters } });
+    return [
+        tool("free_workflow_list_sources", "G0：列出 ComfyUI 工作流目录里的可导入源（rel/name/format），支持 kind/query 过滤。", object({ kind: str, query: str })),
+        tool("free_workflow_import", "G1：按 sourceRel 幂等导入工作流（已存在则同步复用，保留用户参数/布局/文本），返回 entry（含 id）。", object({ sourceRel: str, kind: str, name: str }, ["sourceRel"])),
+        tool("free_workflow_graph", "G2：读取自由工作流转换图，确认有可达输出。", object({ id: str, flowId: str }, ["id"])),
+        tool("free_workflow_health", "G3/G4：只读体检，返回 issues/missingNodes/missingModels/reachableOutputs；不提交 ComfyUI。", object({ id: str, flowId: str }, ["id"])),
+        tool("free_workflow_set_params", "自动披露：写回重要参数（模型/LoRA/VAE/采样/步数/cfg 等），保留用户已有值。params 每项含 node/input/label/type/value/options。", object({ id: str, params: { type: "array", items: { type: "object", additionalProperties: true } } }, ["id", "params"])),
+        tool("free_workflow_configure", "写工作流库配置：页名 flowNames、文本选择 textSelection（首项为主文本）、文本名 textNames、模式 mode、块 blocks/layout。", object({ id: str, flowId: str, flowNames: { type: "object", additionalProperties: { type: "string" } }, textSelection: strings, primaryText: { type: "object", additionalProperties: true }, textNames: { type: "object", additionalProperties: { type: "string" } }, mode: str, blocks: strings, layout: strings }, ["id"])),
+        tool("free_workflow_sync", "同步工作流源文件，刷新转换图/绑定/体检。", object({ id: str, force: { type: "boolean" } }, ["id"])),
+        tool("free_workflow_rename", "重命名自由工作流条目（只改注册名）。", object({ id: str, name: str }, ["id", "name"])),
+        tool("free_workflow_build_request", "G6 干跑：组装请求体并校验必填输入与可达输出，返回 {valid,errors,request}；不提交、不跑 GPU。", object({ id: str, flowId: str, prompt: str, texts: { type: "array", items: { type: "object", additionalProperties: true } }, primaryText: { type: "object", additionalProperties: true }, size: str, seed: {}, count: { type: "number" }, seedFixed: {}, ratio: str, images: strings, enableGroups: strings }, ["id"])),
+        tool("free_workflow_create_card", "建卡：把工作流绑定成自由卡（任务上下文给了 nodeId 就复用那张空卡，否则新建），返回 nodeId。仅在 G6 valid=true 后调用。", object({ id: str, nodeId: str, flowId: str, refs: strings }, ["id"])),
     ];
 }
